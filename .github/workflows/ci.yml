@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Main test suite: everything except DAG structure validation. Uses a
+  # real Postgres service container, not a mock — same reasoning as the
+  # pg_conn fixture itself: SQL correctness (constraints, upserts, SCD-2)
+  # is exactly what a mock would let through wrong. Credentials here match
+  # conftest.py's defaults exactly (mdl/mdl_local_dev/
+  # marketdata_lakehouse_test) — the same defaults local dev uses via
+  # docker-compose, so nothing needs to be overridden for CI specifically.
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: mdl
+          POSTGRES_PASSWORD: mdl_local_dev
+          POSTGRES_DB: marketdata_lakehouse_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U mdl -d marketdata_lakehouse_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run test suite
+        run: PYTHONPATH=. pytest tests/ --ignore=tests/test_dag_structure.py -v
+
+  # DAG structure validation: a genuinely separate job with its OWN
+  # isolated dependencies, not a step in the job above. Confirmed during
+  # development, not a hypothetical: apache-airflow's bundled provider
+  # packages (google, snowflake) pin pandas<2.2, which directly conflicts
+  # with this project's own pandas>=2.2 requirement. Installing both into
+  # the same environment produces real, broken dependency resolution —
+  # this job never installs requirements.txt at all, only what
+  # test_dag_structure.py itself actually needs.
+  dag-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Airflow (isolated from requirements.txt — see job comment)
+        run: |
+          pip install "apache-airflow==2.10.3" \
+            --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.10.3/constraints-3.12.txt"
+          pip install psycopg2-binary python-dotenv pytest
+
+      - name: Validate DAG structure
+        run: PYTHONPATH=. pytest tests/test_dag_structure.py -v

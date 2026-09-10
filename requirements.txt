@@ -1,0 +1,32 @@
+# Ingestion
+yfinance>=1.3.0
+requests>=2.31
+lxml>=5.0          # required by pandas.read_html
+pandas>=2.2
+pyarrow>=15.0       # parquet I/O
+
+# Resilience
+tenacity>=8.2
+
+# Config
+python-dotenv>=1.0
+
+# Warehouse (Project 2 onward also uses this)
+psycopg2-binary>=2.9
+
+# Testing
+pytest>=8.0
+pytest-cov>=5.0
+
+# Data quality
+great_expectations==0.18.8
+# Pinned exactly (not >=0.18): this is the version pip actually resolved
+# against the rest of this project's dependencies, and the version the
+# quality suite's Fluent API calls (context.sources.add_pandas, etc.) were
+# tested against. A loose >=0.18 constraint made the initial install spend
+# several minutes backtracking through candidate versions — pinning avoids
+# that and guarantees the tested API surface.
+
+# Orchestration (added when the Airflow DAG is built — installed separately
+# in the airflow container per docker-compose.yml, not required locally
+# just to run/test the ingestion modules)

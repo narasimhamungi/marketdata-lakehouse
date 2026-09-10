@@ -1,0 +1,60 @@
+Bronze quality report — ingest_date=2026-09-07
+PASS  constituents
+  [  ok ] ticker not null
+  [  ok ] ticker unique
+  [  ok ] gics_sector not null
+  [  ok ] row count in [480, 520]
+
+FAIL  yfinance
+  [  ok ] ticker not null
+  [  ok ] date not null
+  [  ok ] close not null
+  [  ok ] close > 0
+  [  ok ] open > 0
+  [  ok ] adj_close > 0
+  [  ok ] volume >= 0
+  [  ok ] high >= low
+  [  ok ] high >= open
+  [  ok ] high >= close
+  [  ** FAIL **] low <= open (1 unexpected)
+  [  ok ] low <= close
+  [  ok ] (ticker, date) unique
+
+PASS  tiingo
+  [  ok ] ticker not null
+  [  ok ] date not null
+  [  ok ] close not null
+  [  ok ] close > 0
+  [  ok ] open > 0
+  [  ok ] adj_close > 0
+  [  ok ] volume >= 0
+  [  ok ] high >= low
+  [  ok ] high >= open
+  [  ok ] high >= close
+  [  ok ] low <= open
+  [  ok ] low <= close
+  [  ok ] (ticker, date) unique
+
+PASS  fred:CPIAUCSL
+  [  ok ] value not null
+  [  ok ] value > 0 (index level)
+
+PASS  fred:DGS10
+  [  ok ] value not null
+  [  ok ] value in plausible rate range [0, 25]
+
+PASS  fred:DGS3MO
+  [  ok ] value not null
+  [  ok ] value in plausible rate range [0, 25]
+
+PASS  fred:FEDFUNDS
+  [  ok ] value not null
+  [  ok ] value in plausible rate range [0, 25]
+
+PASS  openfigi_mapping
+  [  ok ] figi not null
+  [  ok ] figi unique
+  [  ok ] figi is 12 characters
+  [  ok ] ticker unique
+
+SOME CHECKS FAILED (7/8 sources clean)

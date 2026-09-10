@@ -1,0 +1,35 @@
+Reconciliation report — ingest_date=2026-09-07
+  Compared: 192037 (ticker, date) pairs present in both sources
+  Flagged (> 0.50% adj_close discrepancy): 9094 (4.74%)
+  Present only in yfinance (coverage gap, not a discrepancy): 758785
+  Present only in Tiingo (coverage gap, not a discrepancy): 0
+
+  Affected tickers: 10 of 101 compared — concentration matters more than the headline %, see below
+  ticker    flagged  compared  flagged%  max diff  median diff  flagged window           
+  ACN          1767      1930     91.6%     1.30%        1.29%  2019-01-02 to 2026-01-12
+  ALLE         1684      1930     87.3%     0.66%        0.63%  2019-01-02 to 2025-09-12
+  CBOE         1674      1930     86.7%     0.61%        0.59%  2019-01-02 to 2025-08-28
+  AMCR         1627      1820     89.4%     3.06%        3.01%  2019-06-11 to 2025-11-26
+  T             761      1930     39.4%     7.13%        0.03%  2019-01-02 to 2022-01-06
+  DVN           588      1930     30.5%     1.68%        0.06%  2021-05-13 to 2023-09-13
+  IFF           500      1930     25.9%     5.03%        0.01%  2019-01-02 to 2020-12-23
+  APH           302      1930     15.6%     0.52%        0.25%  2019-01-02 to 2020-03-13
+  ARES          190      1930      9.8%     0.52%        0.38%  2019-06-13 to 2020-03-13
+  GRMN            1      1930      0.1%     1.12%        0.01%  2021-12-07 to 2021-12-07
+
+  Reading this: a flagged window spanning the full history with max ~ median
+  suggests a constant adjustment-factor difference; a window that ends on a
+  specific date with max >> median suggests one vendor restated pre-event
+  history for a corporate action on that date and the other didn't.
+
+  Top individual discrepancies:
+    T 2019-01-07: yfinance=13.5903  tiingo=14.5958  diff=7.135%
+    T 2019-01-04: yfinance=13.3483  tiingo=14.3359  diff=7.135%
+    T 2019-01-03: yfinance=13.0140  tiingo=13.9768  diff=7.135%
+    T 2019-01-02: yfinance=12.9964  tiingo=13.9579  diff=7.135%
+    T 2019-01-08: yfinance=13.7619  tiingo=14.7801  diff=7.135%
+    T 2019-01-23: yfinance=13.8901  tiingo=14.8431  diff=6.633%
+    T 2019-01-10: yfinance=13.6698  tiingo=14.6077  diff=6.633%
+    T 2019-02-26: yfinance=14.0385  tiingo=15.0017  diff=6.633%
+    T 2019-01-31: yfinance=13.5169  tiingo=14.4443  diff=6.633%
+    T 2019-02-22: yfinance=14.0071  tiingo=14.9681  diff=6.633%

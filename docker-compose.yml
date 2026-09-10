@@ -1,0 +1,94 @@
+# Postgres for the gold-layer warehouse, and Airflow for orchestration —
+# using LocalExecutor (see the airflow service's own comments for why,
+# specifically: SequentialExecutor blocks the scheduler's own heartbeat
+# on any long-running task, confirmed against a real DAG run). Still a
+# single Airflow container via `airflow standalone` rather than the full
+# webserver+scheduler+worker+Redis multi-service setup — this is a
+# portfolio-scale demo, not a production deployment needing real task
+# concurrency across machines, and the design philosophy throughout this
+# project has consistently been "don't add infrastructure complexity the
+# actual scale doesn't need."
+services:
+  postgres:
+    image: postgres:16
+    container_name: mdl_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mdl
+      POSTGRES_PASSWORD: mdl_local_dev   # local-only; never used outside docker-compose
+      POSTGRES_DB: marketdata_lakehouse
+    ports:
+      - "5432:5432"
+    volumes:
+      - mdl_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mdl -d marketdata_lakehouse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  airflow:
+    image: apache/airflow:2.10.3-python3.12
+    container_name: mdl_airflow
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # LocalExecutor instead of SequentialExecutor: SequentialExecutor
+      # runs the scheduler's own loop and every task in the same single
+      # thread, which starves the scheduler's internal watchdog
+      # (DagFileProcessorManager) while a longer task — a 503-ticker
+      # yfinance pull — is running. Confirmed against a real run: this
+      # produced exactly that failure ("scheduler does not appear to be
+      # running") mid-DAG. LocalExecutor forks each task into its own
+      # process, so the scheduler loop stays responsive regardless of how
+      # long any individual task takes.
+      #
+      # LocalExecutor requires a real database, not SQLite — reusing the
+      # marketdata_lakehouse database already in this Postgres container
+      # rather than standing up a second one. Airflow's own tables (dag,
+      # task_instance, xcom, etc.) don't collide with this project's
+      # tables (dim_security, fact_price_daily, etc.) — different names,
+      # same database. Not how you'd separate concerns in production, but
+      # a reasonable simplification here rather than adding a second
+      # database just for this.
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://mdl:mdl_local_dev@postgres:5432/marketdata_lakehouse
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      # These override src/config.py's localhost/PROJECT_ROOT defaults so
+      # the DAG's tasks — which import src.* completely unmodified, same
+      # code as every host-run command — connect to the right places from
+      # inside the container: postgres by Docker's internal service-name
+      # DNS (localhost here would mean "this container", not the Postgres
+      # one), and the same bronze/silver data your host-run
+      # `python -m src...` commands already produced.
+      PYTHONPATH: /opt/airflow
+      MDL_DATA_ROOT: /opt/airflow/data
+      MDL_DB_HOST: postgres
+      MDL_DB_PORT: "5432"
+      MDL_DB_NAME: marketdata_lakehouse
+      MDL_DB_USER: mdl
+      MDL_DB_PASSWORD: mdl_local_dev
+    env_file:
+      - .env   # reuses your existing local .env as-is for MDL_TIINGO_API_KEY / MDL_FRED_API_KEY
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./src:/opt/airflow/src
+      - ./data:/opt/airflow/data
+      - ./outputs:/opt/airflow/outputs
+      - ./requirements.txt:/opt/airflow/project-requirements.txt:ro
+    ports:
+      - "8080:8080"
+    # Installs this project's own dependencies (pandas, yfinance, psycopg2,
+    # etc.) into the Airflow image on startup, then runs Airflow itself —
+    # the DAG's tasks import src.* directly and need the same packages the
+    # host environment has. Re-installs on every container start rather
+    # than baking a custom image; slower restarts, but one less Dockerfile
+    # to maintain for a project already carrying enough moving pieces.
+    command: >
+      bash -c "pip install --no-cache-dir -r /opt/airflow/project-requirements.txt &&
+               airflow standalone"
+
+volumes:
+  mdl_pgdata:

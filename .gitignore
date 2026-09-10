@@ -1,0 +1,11 @@
+data/
+outputs/*.html
+outputs/*.png
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+.env
+*.egg-info/
+.DS_Store
