@@ -100,6 +100,7 @@ def run_full_universe(
     refresh_constituents: bool = False,
     tiingo_sample_size: int = DEFAULT_TIINGO_SAMPLE_SIZE,
     sources: tuple[str, ...] = ALL_SOURCES,
+    force_tiingo: bool = False,
 ) -> None:
     ingest_date = ingest_date or date.today()
     constituents = get_constituents(ingest_date, refresh_constituents)
@@ -118,7 +119,7 @@ def run_full_universe(
             "sitting — see README) ---",
             len(sample), len(tickers),
         )
-        ingest_tiingo_batch(sample, ingest_date=ingest_date)
+        ingest_tiingo_batch(sample, ingest_date=ingest_date, force=force_tiingo)
 
     if "fred" in sources:
         logger.info("--- FRED (fixed series, not ticker-scoped) ---")
@@ -135,10 +136,11 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     args = sys.argv[1:]
     refresh = "--refresh-constituents" in args
+    force_tiingo = "--force-tiingo" in args
     date_args = [a for a in args if not a.startswith("--")]
     target_date = date.fromisoformat(date_args[0]) if date_args else date.today()
 
     sources_arg = next((a for a in args if a.startswith("--sources=")), None)
     selected_sources = tuple(sources_arg.split("=", 1)[1].split(",")) if sources_arg else ALL_SOURCES
 
-    run_full_universe(target_date, refresh_constituents=refresh, sources=selected_sources)
+    run_full_universe(target_date, refresh_constituents=refresh, sources=selected_sources, force_tiingo=force_tiingo)

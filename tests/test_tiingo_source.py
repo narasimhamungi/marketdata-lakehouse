@@ -5,9 +5,11 @@ availability, rate limits, or whether its free-tier signup genuinely
 requires no card (documented as unverified in the module docstring).
 """
 from datetime import date
+import time
 
 import pandas as pd
 import pytest
+import requests
 
 from src.ingest import tiingo_source as t
 
@@ -128,6 +130,124 @@ def test_download_one_raises_on_schema_drift(monkeypatch):
 
     with pytest.raises(ValueError, match="schema drift"):
         t._download_one("AAPL", date(2024, 1, 1), date(2024, 1, 3))
+
+
+def test_download_one_does_not_retry_on_404(monkeypatch):
+    """Regression test: 404 (no such ticker) is deterministic — retrying it
+    five times burns throttle slots on a request that was always going to
+    fail the same way. Confirms requests.get is called exactly once."""
+    monkeypatch.setattr("src.ingest.tiingo_source.TIINGO_API_KEY", "a" * 40)
+    call_count = []
+
+    def fake_get(url, params=None, timeout=None):
+        call_count.append(1)
+        return _FakeResponse(status_code=404)
+
+    monkeypatch.setattr("src.ingest.tiingo_source.requests.get", fake_get)
+
+    with pytest.raises(ValueError, match="404"):
+        t._download_one("NOTAREALTICKER", date(2024, 1, 1), date(2024, 1, 3))
+
+    assert len(call_count) == 1
+
+
+def test_download_one_still_retries_on_transient_http_error(monkeypatch):
+    """The retry exclusion is specifically for our own ValueError signals —
+    genuine transient failures (connection errors, 5xx) should still retry
+    as before."""
+    monkeypatch.setattr("src.ingest.tiingo_source.TIINGO_API_KEY", "a" * 40)
+    monkeypatch.setattr("src.ingest.tiingo_source.BACKOFF_BASE_SECONDS", 0)
+    call_count = []
+
+    def flaky_get(url, params=None, timeout=None):
+        call_count.append(1)
+        raise requests.exceptions.ConnectionError("simulated transient failure")
+
+    monkeypatch.setattr("src.ingest.tiingo_source.requests.get", flaky_get)
+
+    with pytest.raises(requests.exceptions.ConnectionError):
+        t._download_one("AAPL", date(2024, 1, 1), date(2024, 1, 3))
+
+    assert len(call_count) == t.MAX_RETRIES
+
+
+def test_ingest_tiingo_batch_skips_existing_ticker_file(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.ingest.tiingo_source.BRONZE_DIR", tmp_path)
+    out_dir = tmp_path / "tiingo_prices" / "ingest_date=2026-09-06"
+    out_dir.mkdir(parents=True)
+    existing = pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02"]),
+            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+            "adj_close": [1.0], "volume": [100], "ticker": ["AAPL"],
+        }
+    )
+    existing.to_parquet(out_dir / "AAPL.parquet")
+
+    def should_not_be_called(ticker, start, end):
+        raise AssertionError(f"_download_one should not be called for already-fetched {ticker}")
+
+    monkeypatch.setattr("src.ingest.tiingo_source._download_one", should_not_be_called)
+
+    result = t.ingest_tiingo_batch(["AAPL"], ingest_date=date(2026, 9, 6))
+
+    assert set(result["ticker"].unique()) == {"AAPL"}
+
+
+def test_ingest_tiingo_batch_force_refetches_existing_ticker(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.ingest.tiingo_source.BRONZE_DIR", tmp_path)
+    out_dir = tmp_path / "tiingo_prices" / "ingest_date=2026-09-06"
+    out_dir.mkdir(parents=True)
+    pd.DataFrame(
+        {
+            "date": pd.to_datetime(["2024-01-02"]),
+            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+            "adj_close": [1.0], "volume": [100], "ticker": ["AAPL"],
+        }
+    ).to_parquet(out_dir / "AAPL.parquet")
+
+    called = []
+
+    def fake_download(ticker, start, end):
+        called.append(ticker)
+        return pd.DataFrame(
+            {
+                "date": pd.to_datetime(["2024-01-02"]),
+                "open": [2.0], "high": [2.0], "low": [2.0], "close": [2.0],
+                "adj_close": [2.0], "volume": [200], "ticker": [ticker],
+            }
+        )
+
+    monkeypatch.setattr("src.ingest.tiingo_source._download_one", fake_download)
+
+    result = t.ingest_tiingo_batch(["AAPL"], ingest_date=date(2026, 9, 6), force=True)
+
+    assert called == ["AAPL"]
+    assert result["adj_close"].iloc[0] == 2.0
+
+
+def test_persist_and_seed_request_timestamps_roundtrip(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.ingest.tiingo_source.BRONZE_DIR", tmp_path)
+    now = time.time()
+    t._request_timestamps.extend([now - 10, now - 5])
+
+    t._persist_request_timestamps()
+    t._request_timestamps.clear()
+    t._seed_request_timestamps_from_disk()
+
+    assert len(t._request_timestamps) == 2
+
+
+def test_seed_request_timestamps_from_disk_prunes_stale_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr("src.ingest.tiingo_source.BRONZE_DIR", tmp_path)
+    now = time.time()
+    t._request_timestamps.append(now - 4000)  # older than an hour
+    t._persist_request_timestamps()
+    t._request_timestamps.clear()
+
+    t._seed_request_timestamps_from_disk()
+
+    assert len(t._request_timestamps) == 0
 
 
 def test_ingest_tiingo_batch_writes_bronze_and_returns_frame(monkeypatch, tmp_path):

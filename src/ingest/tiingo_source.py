@@ -40,6 +40,7 @@ for Tiingo rather than force the full universe through a 10+ hour pull.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
@@ -48,7 +49,7 @@ from datetime import date
 
 import pandas as pd
 import requests
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_not_exception_type, stop_after_attempt, wait_exponential
 
 from src.config import BRONZE_DIR, DEFAULT_START_DATE, MAX_RETRIES, BACKOFF_BASE_SECONDS, TIINGO_API_KEY
 
@@ -63,6 +64,49 @@ TIINGO_PRICES_URL = "https://api.tiingo.com/tiingo/daily/{ticker}/prices"
 # cap a long one.
 _TIINGO_SAFE_HOURLY_LIMIT = 45
 _request_timestamps: deque[float] = deque()
+
+# _request_timestamps is in-memory only — it resets to empty every time this
+# process restarts, but Tiingo's own server-side hourly counter does not
+# reset just because our script restarted. A restarted run (after a crash,
+# Ctrl+C, or simply re-running the command) previously looked "safe" to the
+# throttle while the account could already be close to the real cap from
+# the prior process's requests, risking a genuine 429 rather than our own
+# defensive wait. This file persists the rolling window to disk so a new
+# process picks up where the last one left off.
+_RATE_LIMIT_STATE_FILENAME = "_rate_limit_state.json"
+
+
+def _rate_limit_state_path():
+    return BRONZE_DIR / "tiingo_prices" / _RATE_LIMIT_STATE_FILENAME
+
+
+def _load_persisted_request_timestamps() -> list[float]:
+    path = _rate_limit_state_path()
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+        return [float(ts) for ts in data.get("request_times", [])]
+    except (json.JSONDecodeError, ValueError, OSError):
+        logger.warning("Could not read %s — starting with no rate-limit history", path)
+        return []
+
+
+def _persist_request_timestamps() -> None:
+    path = _rate_limit_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"request_times": list(_request_timestamps)}))
+
+
+def _seed_request_timestamps_from_disk() -> None:
+    """Called once at the top of a batch run. Merges any still-fresh
+    (< 1 hour old) persisted timestamps into the in-memory deque, so the
+    throttle below is immediately aware of requests made by a previous,
+    now-exited process — not just this one."""
+    now = time.time()
+    for ts in _load_persisted_request_timestamps():
+        if now - ts <= 3600 and ts not in _request_timestamps:
+            _request_timestamps.append(ts)
 
 
 def _throttle(now_fn=time.monotonic, sleep_fn=time.sleep) -> None:
@@ -109,6 +153,7 @@ def _validate_token_format(token: str) -> None:
 @retry(
     stop=stop_after_attempt(MAX_RETRIES),
     wait=wait_exponential(multiplier=BACKOFF_BASE_SECONDS, min=BACKOFF_BASE_SECONDS, max=60),
+    retry=retry_if_not_exception_type(ValueError),
     reraise=True,
 )
 def _download_one(ticker: str, start: date, end: date) -> pd.DataFrame:
@@ -119,7 +164,15 @@ def _download_one(ticker: str, start: date, end: date) -> pd.DataFrame:
             "variable before running this."
         )
     _validate_token_format(TIINGO_API_KEY)
-    _throttle()
+    # now_fn=time.time (wall clock, not the default time.monotonic) because
+    # this is the real production call site: the persisted rate-limit state
+    # above is written and read as wall-clock timestamps, which are
+    # meaningful across process restarts. time.monotonic()'s origin is only
+    # defined within a single process's lifetime, so comparing a monotonic
+    # value persisted by one process against another process's clock is not
+    # reliable. Tests inject their own fake now_fn and never touch this
+    # default, so this doesn't affect _throttle's own test coverage.
+    _throttle(now_fn=time.time)
 
     url = TIINGO_PRICES_URL.format(ticker=ticker.lower())
     params = {
@@ -130,9 +183,12 @@ def _download_one(ticker: str, start: date, end: date) -> pd.DataFrame:
     }
     response = requests.get(url, params=params, timeout=30)
     if response.status_code == 404:
-        # Tiingo uses 404 for "no such ticker", not an empty 200 — surface
-        # this distinctly rather than letting it fall into the generic
-        # retry-then-fail path, since retrying a 404 five times is pointless.
+        # Tiingo uses 404 for "no such ticker", not an empty 200 — this is
+        # deterministic (retrying will never change the answer), which is
+        # exactly what excluding ValueError from the retry policy above is
+        # for: this now actually stops on the first attempt instead of
+        # burning 5 throttle slots retrying an error that was always going
+        # to happen again.
         raise ValueError(f"Tiingo has no data for ticker {ticker} (404 — check symbol validity)")
     response.raise_for_status()
 
@@ -174,33 +230,61 @@ def ingest_tiingo_batch(
     start: date = DEFAULT_START_DATE,
     end: date | None = None,
     ingest_date: date | None = None,
+    force: bool = False,
 ) -> pd.DataFrame:
     """
     Pull OHLCV for `tickers` from Tiingo. One HTTP request per ticker (no
     batch endpoint on the free tier), each independently retried. Writes
     one bronze parquet file per ticker, partitioned by ingest_date, and
     returns the concatenated frame.
+
+    Resumable by default: a ticker whose output file already exists for
+    this ingest_date is skipped rather than re-fetched, so a run
+    interrupted partway through (rate limit, crash, Ctrl+C) can simply be
+    re-run and only picks up where it left off, instead of re-spending
+    quota on tickers that already succeeded. Pass force=True to re-fetch
+    everything regardless.
     """
     end = end or date.today()
     ingest_date = ingest_date or date.today()
     out_dir = BRONZE_DIR / "tiingo_prices" / f"ingest_date={ingest_date.isoformat()}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    _seed_request_timestamps_from_disk()
+
     frames = []
     failed_tickers: list[str] = []
+    skipped = 0
 
     for ticker in tickers:
+        out_path = out_dir / f"{ticker}.parquet"
+        if out_path.exists() and not force:
+            skipped += 1
+            frames.append(pd.read_parquet(out_path))
+            continue
+
         try:
             df = _download_one(ticker, start, end)
         except Exception:
             logger.exception("Tiingo download failed for %s after retries", ticker)
             failed_tickers.append(ticker)
             continue
+        finally:
+            # Persist after every real attempt, success or failure — a
+            # request was made against the account's real hourly counter
+            # either way, and this must survive the process being killed
+            # mid-run for the resume-on-restart logic above to be safe.
+            _persist_request_timestamps()
 
-        out_path = out_dir / f"{ticker}.parquet"
         df.to_parquet(out_path, index=False)
         frames.append(df)
         logger.info("Wrote %d rows for %s to %s", len(df), ticker, out_path)
+
+    if skipped:
+        logger.info(
+            "Skipped %d/%d tickers already present for ingest_date=%s (pass force=True to re-fetch)",
+            skipped, len(tickers), ingest_date,
+        )
 
     if failed_tickers:
         failed_path = out_dir / "_failed_tickers.txt"
