@@ -11,10 +11,9 @@ builds on day one.
 
 ## Status
 
-Early build — ingestion layer in progress. See `docs/architecture.md` (added
-once the gold layer exists) for the full design.
+Bronze → silver → gold is built, orchestrated in Airflow and tested in CI. Live-data
+runs are dated in `outputs/`.
 
-- [x] Repo scaffold
 - [x] Constituents ingestion (S&P 500 membership, dated snapshots) — confirmed against live data (503 constituents)
 - [x] yfinance bulk OHLCV ingestion, batched, with retry/backoff and a
       recorded fallback list for tickers that fail — confirmed against live data
@@ -24,39 +23,41 @@ once the gold layer exists) for the full design.
       data. Adjusted-close agrees with yfinance to ~0.002% on AAPL — see
       the reconciliation note below before comparing any other field.
 - [x] FRED ingestion (macro/risk-free rate series) — 4 fixed series
-      (3-month & 10-year Treasury, Fed funds rate, CPI). Not yet tested
-      against live data — needs a free FRED signup and API key first.
+      (3-month & 10-year Treasury, Fed funds rate, CPI).
 - [x] OpenFIGI ingestion (identifier mapping) — no API key required at
       this scale (unkeyed rate limit is enough for a one-time backfill).
-      Not yet tested against live data.
-
 - [x] Quality suite on bronze (Great Expectations) — schema, null, range,
       internal-consistency (high/low/open/close relationships), and
       uniqueness checks across all five sources. Confirmed against live
       data: 8/8 sources clean (all four FRED series checked individually).
+      The committed 2026-09-07 report shows 7/8: it predates the handling of
+      a single real bad print (`HUBB`, see Tests).
 - [x] Silver transform (typed, deduped, fully-adjusted OHLCV) — one clean
       table per price source (yfinance, Tiingo), kept separate on purpose
       since reconciliation (next) compares them against each other.
       yfinance only provides adj_close, so adj_open/high/low are derived
       via the standard adj_close/close factor technique, explicit and
-      auditable rather than hidden inside a library flag. Tiingo actually
-      provides adj_open/adj_high/adj_low/adj_volume natively — the ingest
-      module was updated to capture them instead of discarding them, with
-      a fallback to the same derivation technique for any older Tiingo
-      bronze partitions pulled before that fix. Tested (9 tests, including
-      the fallback path) but not yet run against your live bronze data.
-- [ ] Cross-source reconciliation (tolerance-band comparison)
+      auditable rather than hidden inside a library flag. Tiingo provides
+      adj_open/adj_high/adj_low/adj_volume natively and the ingest module
+      captures them, with a fallback to the same derivation for Tiingo
+      bronze partitions pulled before that change.
 - [x] Cross-source reconciliation (tolerance-band comparison) — compares
       only adj_close between yfinance and Tiingo silver (raw OHLC isn't
       comparable, see the note above), symmetric % discrepancy (relative
       to the average of both sources, not biased toward either one), 0.5%
       tolerance. Coverage gaps (a ticker/date in only one source) are
       tracked separately from actual discrepancies — conflating the two
-      would understate what was really checked. Tested (7 tests) but not
-      yet run against your live silver data.
-- [ ] Gold dimensional model (Postgres)
-- [ ] Airflow orchestration
-- [ ] CI (GitHub Actions)
+      would understate what was really checked. Live run 2026-09-07:
+      192,037 ticker-date pairs across 101 tickers
+      (`outputs/reconciliation_report_2026-09-07.txt`).
+- [x] Gold dimensional model (Postgres) — see "Gold layer" below
+- [x] Airflow orchestration — see "Orchestration (Airflow)" below
+- [x] CI (GitHub Actions) — see "CI" below
+- [x] SEC N-PORT cross-check of the constituents list (SPY's disclosed
+      holdings, compared against the Wikipedia table) — built and
+      unit-tested; not in the DAG, and the live SEC fetch path has not been
+      run end to end. Wikipedia remains the source of record (tickers and
+      sectors); N-PORT carries neither.
 
 ## Why these sources
 
@@ -67,6 +68,7 @@ once the gold layer exists) for the full design.
 | Wikipedia S&P 500 table | Index constituents | Free (factual/tabular data) |
 | FRED | Macro series, risk-free rate | Free, requires a free API key |
 | OpenFIGI | Instrument identifier mapping | Free |
+| SEC Form N-PORT (SPY holdings) | Cross-check on the constituents list, not a source | Free |
 
 **On the switch from Stooq to Tiingo:** the original plan used Stooq as a
 no-registration free source. Running this against live data surfaced that
@@ -269,9 +271,8 @@ python -m src.orchestrate.run_full_universe 2026-09-07
 
 ## Running the ingestion locally
 
-This sandbox environment has no network access to Yahoo, Tiingo, Wikipedia,
-FRED, or SEC EDGAR — only the unit tests (which mock all network calls) run
-here. Live ingestion needs to run on a machine with normal internet access:
+The unit tests mock every network call. Live ingestion needs normal internet
+access to Yahoo, Tiingo, Wikipedia, FRED and OpenFIGI:
 
 ```bash
 python -m venv .venv && source .venv/bin/activate   # or your usual environment
@@ -292,7 +293,7 @@ ingest_yfinance_batch(tickers)
 "
 
 # Pull the same tickers from Tiingo — requires a free API token first:
-#   1. Sign up at https://api.tiingo.com (flag it here if it asks for a card)
+#   1. Sign up at https://api.tiingo.com
 #   2. Set the environment variable: setx MDL_TIINGO_API_KEY "your_token_here"
 #      (then open a new terminal so it takes effect)
 python -m src.ingest.tiingo_source AAPL MSFT AMZN
@@ -313,9 +314,9 @@ python -m src.quality.bronze_checks
 python -m src.quality.bronze_checks 2026-09-07
 
 # Build the silver layer (typed, deduped, adjusted OHLCV) from today's
-# bronze. Re-run Tiingo ingestion first if you want Tiingo's own native
-# adjusted OHLC rather than the derived fallback — the ingest module was
-# updated after your last Tiingo pull to capture those fields directly.
+# bronze. Tiingo partitions pulled before the ingest module captured
+# Tiingo's native adjusted OHLC fall back to the derived method; re-run
+# Tiingo ingestion first if you want the native fields.
 python -m src.transform.silver_prices
 
 # Reconcile the two sources against each other (requires silver for both
@@ -341,9 +342,9 @@ $env:PYTHONPATH = "."
 python -m pytest tests/ --ignore=tests/test_dag_structure.py -v
 ```
 
-118 tests, mocking every external network boundary (Wikipedia, yfinance,
-Tiingo, FRED, OpenFIGI) so they verify this project's own logic, not a
-third-party service's availability — except the ~40 gold-layer tests,
+131 tests, mocking every external network boundary (Wikipedia, yfinance,
+Tiingo, FRED, OpenFIGI, SEC) so they verify this project's own logic, not a
+third-party service's availability — except the 26 gold-layer tests,
 which deliberately use a real local Postgres instead of a mock (see "Gold
 layer" above for the one-time test-database setup); SQL correctness is
 exactly what a mock would let through wrong.
