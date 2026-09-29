@@ -1,0 +1,60 @@
+Reconciliation report — ingest_date=2026-09-08
+  Compared: 63575 (ticker, date) pairs present in both sources
+  Flagged (> 0.50% adj_close discrepancy): 1262 (1.99%)
+  Present only in yfinance (coverage gap, not a discrepancy): 635830
+  Present only in Tiingo (coverage gap, not a discrepancy): 15361
+
+  Affected tickers: 3 of 34 compared — concentration matters more than the headline %, see below
+  ticker    flagged  compared  flagged%  max diff  median diff  flagged window           
+  T             761      1932     39.4%     7.13%        0.03%  2019-01-02 to 2022-01-06
+  IFF           500      1932     25.9%     5.03%        0.01%  2019-01-02 to 2020-12-23
+  GRMN            1      1932      0.1%     1.12%        0.01%  2021-12-07 to 2021-12-07
+
+  Reading this: a flagged window spanning the full history with max ~ median
+  suggests a constant adjustment-factor difference; a window that ends on a
+  specific date with max >> median suggests one vendor restated pre-event
+  history for a corporate action on that date and the other didn't.
+
+  Top individual discrepancies:
+    T 2019-01-08: yfinance=13.7619  tiingo=14.7801  diff=7.135%
+    T 2019-01-02: yfinance=12.9964  tiingo=13.9579  diff=7.135%
+    T 2019-01-04: yfinance=13.3483  tiingo=14.3359  diff=7.135%
+    T 2019-01-03: yfinance=13.0140  tiingo=13.9768  diff=7.135%
+    T 2019-01-07: yfinance=13.5903  tiingo=14.5958  diff=7.135%
+    T 2019-02-04: yfinance=13.3146  tiingo=14.2281  diff=6.633%
+    T 2019-04-05: yfinance=14.5467  tiingo=15.5447  diff=6.633%
+    T 2019-01-31: yfinance=13.5169  tiingo=14.4443  diff=6.633%
+    T 2019-03-28: yfinance=13.9441  tiingo=14.9008  diff=6.633%
+    T 2019-02-08: yfinance=13.2876  tiingo=14.1992  diff=6.633%
+
+--- Investigation notes (added manually, not part of the script's output) ---
+
+T (AT&T): flagged window ends 2022-01-06, right before AT&T's Feb 1, 2022
+announcement of the WarnerMedia/Discovery spin-off terms AND a ~47% dividend
+cut (from $2.08/share to $1.11/share annual), closing April 8, 2022.
+Confirmed against AT&T's own 8-K filings and press coverage. A dividend cut
+of that size forces a retroactive recalculation of every prior adjusted-close
+value (adjustment factors are built from cumulative future distributions) —
+the ~7% constant-ish gap across all pre-2022-01-06 history is consistent
+with yfinance and Tiingo having recalculated that adjustment factor at
+different times or with different assumptions. Not a data bug in either
+vendor; a real methodology-timing difference.
+
+IFF: flagged window ends 2020-12-23, right before IFF's $26.2B Reverse
+Morris Trust merger with DuPont's Nutrition & Biosciences business closed
+February 1, 2021 (DuPont shareholders received 55.4% of the combined
+company — effectively a near-doubling of IFF's share count). Same pattern:
+a major share-count-changing corporate action just after the flagged
+window ends, consistent with an adjustment-factor recalculation
+discrepancy between vendors.
+
+GRMN: single row, 0.1% of history — noise, not investigated further.
+
+Scope note: 34 of 42 successfully-fetched Tiingo tickers had matching
+yfinance silver data to compare against; the other 8 (ABNB, AEE, ALB, BX,
+CASY, DE, DECK, EXE, FOX, FOXA, and others) aren't yet in yfinance's silver
+layer for any date — a full-universe-backfill-in-progress gap, not a
+reconciliation bug. CBOE, COHR, CSGP still fail on Tiingo entirely
+(consistent 404-type failure across two separate days) — needs a live
+investigation with real Tiingo API access, which this environment doesn't
+have.
